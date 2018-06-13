@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# auto-config-network: Configura automáticamente las interfaces de red del equipo
+#
+# Este script borra el fichero /etc/udev/rules.d/70-persistent-rules por si se
+# hubiera clonado el equipo y lo vuelve a regenerar detectando las interfaces
+# de red de la máquina.
+# Por otro lado, hace una copia el fichero /etc/network/interfaces en
+# /etc/network/interfaces.old y lo regenera automáticamente, configurando:
+# * La interfaz localhost.
+# * Con IP estática, las interfaces con link configuradas para servir DHCP
+#   en el fichero /etc/default/isc-dhcp-server
+# * Con IP dinámica, las interfaces con link no configuradas para servir DHCP
+#
+# Esteban M. Navas <algodelinux@gmail.com>
+# Fecha creación:      12/06/2018
+# Última modificación: 13/06/2018
+
+DHCPSERVER="172.19.144.2"
+DNSSERVER="172.19.144.2"
+timeout=30
+
+waitfor () {
+   ping -c 1 -n -w $timeout $1 &>/dev/null
+   return $?
+}
+
+rm -f /etc/udev/rules.d/70-persistent-net.rules
+mv /etc/network/interfaces /etc/network/interfaces.old
+udevadm trigger --type=devices --action=add
+
+echo "auto lo
+iface lo inet loopback
+" > /etc/network/interfaces
+
+INTERFACES=$(ip link show|grep ^[0-9]| grep -v lo|cut -f2 -d":"|sed 's/^[ \t]*//')
+
+for INTERFACE in $INTERFACES; do
+    ifconfig $INTERFACE up
+    ip link show $INTERFACE 2>/dev/null | grep -i 'state up'
+
+    if [ $? -eq "0" ]; then # Si hay link
+
+       DHCPINTERFACE=$(test -f /etc/default/isc-dhcp-server && sed -n 's|^INTERFACES="\(.*\)".*|\1|p' /etc/default/isc-dhcp-server)
+
+       if [ "$INTERFACE" == "$DHCPINTERFACE" ]; then
+          echo "auto $INTERFACE
+iface $INTERFACE inet static
+    address 192.168.0.254
+    netmask 255.255.255.0
+    network 192.168.0.0
+    broadcast 192.168.0.255
+    dns-nameservers $DNSSERVER
+" >> /etc/network/interfaces
+       else
+          waitfor $DHCPSERVER
+          if [ $? -eq "0" ]; then
+             dhclient $INTERFACE
+          fi
+
+          IP=$(ip addr show $INTERFACE | grep -v inet6 | grep 'inet' | sed 's/^[ \t]*//' | cut -f2 -d" " | cut -f1 -d"/")
+
+          if [ "$IP" ]; then
+             echo "auto $INTERFACE
+iface $INTERFACE inet dhcp
+" >> /etc/network/interfaces
+          fi
+       fi
+    else # Si no hay link
+       echo "iface $INTERFACE inet manual
+" >> /etc/network/interfaces
+    fi
+done
